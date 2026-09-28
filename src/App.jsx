@@ -4,13 +4,10 @@ import {
   Pause,
   Square,
   Upload,
-  Image as ImageIcon,
   Settings,
   Volume2,
   RefreshCw,
   Sparkles,
-  Sliders,
-  Cpu,
   Trash2,
   FileText,
   CheckCircle2,
@@ -19,10 +16,14 @@ import {
   SkipBack,
   SkipForward,
   ArrowLeft,
-  Printer
+  Printer,
+  AlertTriangle,
+  Loader2,
+  X
 } from 'lucide-react';
 import { 
   extractTextFromPDF, 
+  extractTextFromDocx,
   parseCVText, 
   detectLanguage, 
   generateCVSummary, 
@@ -156,30 +157,35 @@ export default function App() {
 
   // CV File Parsing Handler
   const handleCVFile = async (file) => {
+    if (!file) return;
     setIsParsing(true);
     setErrorMsg('');
     try {
       let text = '';
-      if (file.name.endsWith('.pdf')) {
+      const lowerName = (file.name || '').toLowerCase();
+
+      if (lowerName.endsWith('.pdf')) {
         text = await extractTextFromPDF(file);
-      } else if (file.name.endsWith('.txt')) {
+      } else if (lowerName.endsWith('.docx')) {
+        text = await extractTextFromDocx(file);
+      } else if (lowerName.endsWith('.txt') || lowerName.endsWith('.md') || lowerName.endsWith('.rtf')) {
         text = await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = (e) => resolve(e.target.result);
-          reader.onerror = (e) => reject(new Error("Failed to read text file."));
+          reader.onerror = () => reject(new Error("Failed to read text file."));
           reader.readAsText(file);
         });
       } else {
-        throw new Error("Unsupported file format. Please upload a PDF or TXT file.");
+        throw new Error("Unsupported file format. Please upload a PDF (.pdf), Word document (.docx), or Text file (.txt, .md).");
       }
 
-      if (!text.trim()) {
-        throw new Error("The file seems to be empty or has no readable text.");
+      if (!text || !text.trim()) {
+        throw new Error("The file seems to be empty or has no readable text. If this is a scanned document, please paste the text directly.");
       }
 
       processRawText(text, file.name);
     } catch (err) {
-      console.error(err);
+      console.error("CV parse error:", err);
       setErrorMsg(err.message || "Failed to parse the CV file.");
     } finally {
       setIsParsing(false);
@@ -203,22 +209,33 @@ export default function App() {
 
   // Plain Text parsing helper
   const processRawText = (text, fileName = 'Pasted Text') => {
-    const lang = detectLanguage(text);
-    const parsed = parseCVText(text, lang);
-    const summary = generateCVSummary(parsed, lang);
+    try {
+      const lang = detectLanguage(text);
+      const parsed = parseCVText(text, lang);
 
-    setSections(parsed);
-    setLanguage(lang);
-    setCvFileName(fileName);
-    setRawText(text);
-    setSummaryData(summary);
-    setRevealedSections(new Set()); // reset revealed sections
-    if (speechControllerRef.current) {
-      speechControllerRef.current.stop();
+      if (!parsed || parsed.length === 0) {
+        throw new Error("Could not extract readable CV sections from the provided text.");
+      }
+
+      const summary = generateCVSummary(parsed, lang);
+
+      setSections(parsed);
+      setLanguage(lang);
+      setCvFileName(fileName);
+      setRawText(text);
+      setSummaryData(summary);
+      setRevealedSections(new Set()); // reset revealed sections
+      setErrorMsg(''); // clear errors on success
+      if (speechControllerRef.current) {
+        speechControllerRef.current.stop();
+      }
+
+      // Run qualification checks for already existing items
+      runAllQualificationChecks(text, parsed, qualificationResults);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(err.message || "Failed to process CV content.");
     }
-
-    // Run qualification checks for already existing items
-    runAllQualificationChecks(text, parsed, qualificationResults);
   };
 
   // Photo Upload Handler
@@ -713,6 +730,48 @@ Ensure the language of the CV is English (unless custom focus suggests a differe
         </div>
       </header>
 
+      {/* Global Error Banner */}
+      {errorMsg && (
+        <div 
+          className="card-glass" 
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '0.85rem 1.25rem',
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            borderRadius: '12px',
+            color: '#fca5a5',
+            margin: '0.5rem 0 1.25rem 0',
+            gap: '1rem',
+            boxShadow: '0 4px 15px rgba(239, 68, 68, 0.15)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <AlertTriangle size={20} style={{ color: '#ef4444', flexShrink: 0 }} />
+            <span style={{ fontSize: '0.9rem', fontWeight: 500, lineHeight: 1.4 }}>{errorMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorMsg('')}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: '#fca5a5',
+              cursor: 'pointer',
+              display: 'flex',
+              padding: '4px',
+              borderRadius: '6px',
+              alignItems: 'center'
+            }}
+            title="Dismiss error"
+          >
+            <X size={18} />
+          </button>
+        </div>
+      )}
+
       {/* Main Grid Workspace */}
       <main className="dashboard-grid">
 
@@ -1040,7 +1099,13 @@ Ensure the language of the CV is English (unless custom focus suggests a differe
                     type="file"
                     accept="image/*"
                     style={{ display: 'none' }}
-                    onChange={(e) => e.target.files[0] && handlePhotoFile(e.target.files[0])}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handlePhotoFile(e.target.files[0]);
+                      }
+                      e.target.value = '';
+                    }}
                   />
                   <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                     Click or drag photo to customize avatar
@@ -1127,27 +1192,45 @@ Ensure the language of the CV is English (unless custom focus suggests a differe
                     Upload CV Document
                   </h2>
                   <div
-                    className={`upload-zone ${cvDragActive ? 'active' : ''}`}
+                    className={`upload-zone ${cvDragActive ? 'active' : ''} ${isParsing ? 'parsing' : ''}`}
                     onDragEnter={(e) => handleDrag(e, 'cv')}
                     onDragLeave={(e) => handleDrag(e, 'cv')}
                     onDragOver={(e) => handleDrag(e, 'cv')}
                     onDrop={(e) => handleDrop(e, 'cv')}
-                    onClick={() => document.getElementById('cv-file-input').click()}
-                    style={{ padding: '2.5rem 2rem' }}
+                    onClick={() => !isParsing && document.getElementById('cv-file-input').click()}
+                    style={{
+                      padding: '2.5rem 2rem',
+                      opacity: isParsing ? 0.75 : 1,
+                      cursor: isParsing ? 'wait' : 'pointer'
+                    }}
                   >
                     <input
                       id="cv-file-input"
                       type="file"
-                      accept=".pdf,.txt"
+                      accept=".pdf,.docx,.txt,.md,.rtf"
                       style={{ display: 'none' }}
-                      onChange={(e) => e.target.files[0] && handleCVFile(e.target.files[0])}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleCVFile(e.target.files[0]);
+                        }
+                        e.target.value = '';
+                      }}
                     />
                     <div className="upload-icon-container">
-                      <Upload size={24} />
+                      {isParsing ? (
+                        <Loader2 size={26} className="animate-spin" style={{ animation: 'spin 1s linear infinite', color: 'var(--primary)' }} />
+                      ) : (
+                        <Upload size={24} />
+                      )}
                     </div>
                     <div>
-                      <strong style={{ display: 'block', fontSize: '1rem' }}>Upload CV File</strong>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Supports PDF or TXT</span>
+                      <strong style={{ display: 'block', fontSize: '1rem', color: isParsing ? 'var(--primary)' : 'inherit' }}>
+                        {isParsing ? 'Analyzing & Parsing CV...' : 'Upload CV File'}
+                      </strong>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        {isParsing ? 'Extracting text and identifying sections...' : 'Supports PDF, Word (.docx), or TXT'}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1219,6 +1302,28 @@ Ensure the language of the CV is English (unless custom focus suggests a differe
                       <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--secondary)' }}>READING ACTIVE</span>
                     </div>
                   )}
+                  <input
+                    id="cv-file-input-replace"
+                    type="file"
+                    accept=".pdf,.docx,.txt,.md,.rtf"
+                    style={{ display: 'none' }}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleCVFile(e.target.files[0]);
+                      }
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => document.getElementById('cv-file-input-replace').click()}
+                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
+                    title="Upload another CV file"
+                  >
+                    <Upload size={16} /> Replace CV
+                  </button>
                   <button
                     type="button"
                     className="btn-primary"

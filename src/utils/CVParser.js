@@ -1,23 +1,41 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import mammoth from 'mammoth';
 
-// Set up PDFJS worker locally via Vite
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// Set up PDFJS worker locally via standard Vite / browser URL, with fallback
+if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/build/pdf.worker.min.mjs',
+      import.meta.url
+    ).toString();
+  } catch (e) {
+    console.warn("Could not set local workerSrc, using unpkg fallback", e);
+    const version = pdfjsLib.version || '6.1.200';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+  }
+}
 
 /**
  * Detect language based on frequencies of common stop words
  * @param {string} text 
- * @returns {string} Language code ('en', 'es', 'fr', 'de')
+ * @returns {string} Language code ('en', 'es', 'fr', 'de', 'ar')
  */
 export function detectLanguage(text) {
+  if (!text) return 'en';
+
+  // 1. Check for Arabic characters directly by Unicode range
+  const arabicMatches = text.match(/[\u0600-\u06FF]/g);
+  if (arabicMatches && arabicMatches.length > 15) {
+    return 'ar';
+  }
+
   const cleanText = text.toLowerCase();
   
   const stopWords = {
-    en: /\b(the|and|of|to|in|for|is|with|on|at|by|an)\b/g,
-    es: /\b(el|la|los|las|de|y|en|un|una|con|es|para|por)\b/g,
-    fr: /\b(le|la|les|de|et|en|un|une|avec|est|pour|dans|par)\b/g,
-    de: /\b(der|die|das|und|in|zu|von|mit|ist|für|auf|ein|eine)\b/g,
-    ar: /\b(من|في|على|إلى|أن|هذا|هذه|مع|أو|تم|كان|كانت)\b/g
+    en: /\b(the|and|of|to|in|for|is|with|on|at|by|an|from|as|about|experience|education|skills)\b/g,
+    es: /\b(el|la|los|las|de|y|en|un|una|con|es|para|por|del|al|experiencia|educación|habilidades)\b/g,
+    fr: /\b(le|la|les|de|et|en|un|une|avec|est|pour|dans|par|des|du|expérience|formation|compétences)\b/g,
+    de: /\b(der|die|das|und|in|zu|von|mit|ist|für|auf|ein|eine|ausbildung|erfahrung|kenntnisse)\b/g
   };
 
   let maxCount = 0;
@@ -36,21 +54,34 @@ export function detectLanguage(text) {
 }
 
 /**
- * Split a paragraph into clean sentences
+ * Split a paragraph into clean sentences, supporting Latin and Arabic punctuation
  * @param {string} paragraphText 
  * @returns {string[]}
  */
 function splitIntoSentences(paragraphText) {
   if (!paragraphText) return [];
+  const trimmed = paragraphText.trim();
+  if (!trimmed) return [];
   
-  // Match sentence ending punctuation followed by space or end of line
-  // Avoid splitting common abbreviations like 'Dr.', 'Sr.', 'i.e.', 'e.g.', 'A.I.'
-  const sentences = paragraphText
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/g)
+  // Split on sentence-ending punctuation (., !, ?, Arabic question mark ؟) followed by whitespace
+  const sentences = trimmed
+    .split(/(?<=[.!?؟])\s+(?=[\p{Lu}\p{Lt}\p{N}\u0600-\u06FF]|\b)/gu)
     .map(s => s.trim())
     .filter(s => s.length > 0);
   
-  return sentences.length > 0 ? sentences : [paragraphText.trim()];
+  return sentences.length > 0 ? sentences : [trimmed];
+}
+
+/**
+ * Clean a line to check if it looks like a section header
+ * @param {string} line 
+ * @returns {string}
+ */
+function cleanHeaderCandidate(line) {
+  return line
+    .replace(/^[\s#*_\-•●■◆\d.)]+/, '') // strip leading markdown (#), bullets, numbers
+    .replace(/[\s#*_\-•:/|~]+$/, '')   // strip trailing colons, markdown, pipes
+    .trim();
 }
 
 /**
@@ -59,64 +90,71 @@ function splitIntoSentences(paragraphText) {
  * @param {string} lang 
  */
 export function parseCVText(text, lang = 'en') {
-  const lines = text.split(/\r?\n/).map(line => line.trim());
+  if (!text || !text.trim()) {
+    return [];
+  }
+
+  const rawLines = text.split(/\r?\n/).map(line => line.trim());
   
-  // Section keywords per language
+  // Section keywords per language with flexible matching
   const keywords = {
     en: {
-      summary: /^(summary|about me|professional summary|profile|objective|career objective)$/i,
-      experience: /^(experience|work experience|employment history|employment|professional experience|work history|job history)$/i,
-      education: /^(education|academic background|academic history|studies|qualifications)$/i,
-      skills: /^(skills|technical skills|key skills|expertise|competencies|technologies)$/i,
-      projects: /^(projects|personal projects|key projects|selected projects)$/i,
-      certifications: /^(certifications|licenses|courses|awards|accomplishments)$/i,
-      contact: /^(contact|contact details|personal info|personal information)$/i,
-      languages: /^(languages|language skills)$/i
+      summary: /^(summary|about\s*me|professional\s*summary|profile|career\s*profile|objective|career\s*objective|executive\s*summary|overview|bio|biography|about)$/i,
+      experience: /^(experience|work\s*experience|employment\s*history|employment|professional\s*experience|work\s*history|job\s*history|career\s*history|relevant\s*experience|experience\s*&\s*projects|professional\s*background)$/i,
+      education: /^(education|academic\s*background|academic\s*history|studies|qualifications|academic\s*qualifications|degrees|education\s*&\s*training|education\s*&\s*certifications|university)$/i,
+      skills: /^(skills|technical\s*skills|key\s*skills|core\s*competencies|competencies|technologies|expertise|areas\s*of\s*expertise|tools\s*&\s*technologies|technical\s*proficiencies|skills\s*&\s*abilities|proficiencies)$/i,
+      projects: /^(projects|personal\s*projects|key\s*projects|selected\s*projects|portfolio|featured\s*projects|academic\s*projects|notable\s*projects)$/i,
+      certifications: /^(certifications|licenses|courses|awards|accomplishments|achievements|certifications\s*&\s*licenses|credentials|honors\s*&\s*awards|training)$/i,
+      contact: /^(contact|contact\s*details|contact\s*information|contact\s*info|personal\s*info|personal\s*information|get\s*in\s*touch)$/i,
+      languages: /^(languages|language\s*skills|languages\s*spoken|language\s*proficiency)$/i
     },
     es: {
-      summary: /^(resumen|sobre mí|resumen profesional|perfil|objetivo|perfil profesional)$/i,
-      experience: /^(experiencia|experiencia laboral|trayectoria profesional|historial laboral)$/i,
-      education: /^(educación|formación académica|estudios|formación)$/i,
-      skills: /^(habilidades|competencias|aptitudes|tecnologías|conocimientos)$/i,
-      projects: /^(proyectos|proyectos personales)$/i,
-      certifications: /^(certificaciones|licencias|cursos|premios|logros)$/i,
-      contact: /^(contacto|datos de contacto|información personal)$/i,
-      languages: /^(idiomas)$/i
+      summary: /^(resumen|sobre\s*mí|resumen\s*profesional|perfil|objetivo|perfil\s*profesional|perfil\s*laboral|acerca\s*de\s*mí)$/i,
+      experience: /^(experiencia|experiencia\s*laboral|trayectoria\s*profesional|historial\s*laboral|experiencia\s*profesional|empleo|historial\s*de\s*empleo)$/i,
+      education: /^(educación|formación\s*académica|estudios|formación|titulaciones|títulos|universidad)$/i,
+      skills: /^(habilidades|competencias|aptitudes|tecnologías|conocimientos|habilidades\s*técnicas|herramientas)$/i,
+      projects: /^(proyectos|proyectos\s*personales|proyectos\s*destacados|portafolio)$/i,
+      certifications: /^(certificaciones|licencias|cursos|premios|logros|diplomas|certificados)$/i,
+      contact: /^(contacto|datos\s*de\s*contacto|información\s*personal|datos\s*personales)$/i,
+      languages: /^(idiomas|competencia\s*lingüística)$/i
     },
     fr: {
-      summary: /^(résumé|à propos|profil|objectif|résumé professionnel)$/i,
-      experience: /^(expérience|expérience professionnelle|parcours professionnel|expériences)$/i,
-      education: /^(éducation|formation|études|diplômes|cursus académique)$/i,
-      skills: /^(compétences|expertises|technologies|savoir-faire)$/i,
-      projects: /^(projets|projets personnels|réalisations)$/i,
-      certifications: /^(certifications|licences|formations|prix|distinctions)$/i,
-      contact: /^(contact|coordonnées|informations personnelles)$/i,
-      languages: /^(langues)$/i
+      summary: /^(résumé|à\s*propos|profil|objectif|résumé\s*professionnel|profil\s*professionnel|biographie)$/i,
+      experience: /^(expérience|expérience\s*professionnelle|parcours\s*professionnel|expériences|historique\s*professionnel)$/i,
+      education: /^(éducation|formation|études|diplômes|cursus\s*académique|parcours\s*académique)$/i,
+      skills: /^(compétences|expertises|technologies|savoir-faire|compétences\s*techniques|outils)$/i,
+      projects: /^(projets|projets\s*personnels|réalisations|projets\s*notables)$/i,
+      certifications: /^(certifications|licences|formations|prix|distinctions|attestations)$/i,
+      contact: /^(contact|coordonnées|informations\s*personnelles|contactez-moi)$/i,
+      languages: /^(langues|langues\s*parlées)$/i
     },
     de: {
-      summary: /^(zusammenfassung|über mich|profil|berufliches profil)$/i,
-      experience: /^(berufserfahrung|werdegang|beruflicher werdegang|praxiserfahrung)$/i,
-      education: /^(ausbildung|bildungsweg|schulausbildung|studium)$/i,
-      skills: /^(kenntnisse|fähigkeiten|it-kenntnisse|kompetenzen)$/i,
-      projects: /^(projekte|projekterfahrung)$/i,
-      certifications: /^(zertifikate|zertifizierungen|kurse|auszeichnungen)$/i,
-      contact: /^(kontakt|kontaktdaten|persönliche angaben)$/i,
-      languages: /^(sprachen)$/i
+      summary: /^(zusammenfassung|über\s*mich|profil|berufliches\s*profil|kurzprofil|überblick)$/i,
+      experience: /^(berufserfahrung|werdegang|beruflicher\s*werdegang|praxiserfahrung|berufliche\s*laufbahn)$/i,
+      education: /^(ausbildung|bildungsweg|schulausbildung|studium|akademischer\s*werdegang)$/i,
+      skills: /^(kenntnisse|fähigkeiten|it-kenntnisse|kompetenzen|fachkenntnisse|technologien)$/i,
+      projects: /^(projekte|projekterfahrung|ausgewählte\s*projekte|portfolio)$/i,
+      certifications: /^(zertifikate|zertifizierungen|kurse|auszeichnungen|weiterbildung)$/i,
+      contact: /^(kontakt|kontaktdaten|persönliche\s*angaben)$/i,
+      languages: /^(sprachen|sprachkenntnisse)$/i
     },
     ar: {
-      summary: /^(الملخص المهني|نبذة عني|الملخص|عني|الهدف المهني|الهدف)$/i,
-      experience: /^(الخبرة|الخبرة العملية|تاريخ التوظيف|التوظيف|الخبرات المهنية|الخبرات)$/i,
-      education: /^(التعليم|الخلفية الأكاديمية|الدراسة|المؤهلات|الشهادات الأكاديمية)$/i,
-      skills: /^(المهارات|المهارات التقنية|المهارات الأساسية|الخبرات التقنية|التخصصات)$/i,
-      projects: /^(المشاريع|المشاريع الشخصية|أبرز المشاريع)$/i,
-      certifications: /^(الشهادات|الشهادات المهنية|الدورات التدريبية|الجوائز|الإنجازات)$/i,
-      contact: /^(الاتصال|بيانات الاتصال|معلومات الاتصال|المعلومات الشخصية)$/i,
-      languages: /^(اللغات|مهارات اللغة)$/i
+      summary: /^(الملخص\s*المهني|نبذة\s*عني|الملخص|عني|الهدف\s*المهني|الهدف|الملف\s*الشخصي|نبذة\s*موجزة)$/i,
+      experience: /^(الخبرة|الخبرة\s*العملية|تاريخ\s*التوظيف|التوظيف|الخبرات\s*المهنية|الخبرات|المسار\s*المهني|الخبرة\s*والأعمال)$/i,
+      education: /^(التعليم|الخلفية\s*الأكاديمية|الدراسة|المؤهلات|الشهادات\s*الأكاديمية|التعليم\s*والتدريب|المؤهلات\s*العلمية)$/i,
+      skills: /^(المهارات|المهارات\s*التقنية|المهارات\s*الأساسية|الخبرات\s*التقنية|التخصصات|الكفاءات|الأدوات\s*والتقنيات)$/i,
+      projects: /^(المشاريع|المشاريع\s*الشخصية|أبرز\s*المشاريع|معرض\s*الأعمال|المشاريع\s*المنجزة)$/i,
+      certifications: /^(الشهادات|الشهادات\s*المهنية|الدورات\s*التدريبية|الجوائز|الإنجازات|التدريب\s*والشهادات)$/i,
+      contact: /^(الاتصال|بيانات\s*الاتصال|معلومات\s*الاتصال|المعلومات\s*الشخصية|التواصل)$/i,
+      languages: /^(اللغات|مهارات\s*اللغة|اللغات\s*المتقنة)$/i
     }
   };
 
   const currentKeywords = keywords[lang] || keywords.en;
   
+  // Also check English keywords as secondary fallback if language was detected as non-English
+  const fallbackKeywords = keywords.en;
+
   const parsedSections = [];
   let currentSection = {
     id: 'intro',
@@ -127,20 +165,32 @@ export function parseCVText(text, lang = 'en') {
   };
 
   // Process line by line
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-
-    // Check if line is a header: short line (usually < 40 chars)
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    
+    // Check if line looks like a header
     let isHeader = false;
     let matchedType = null;
+    const cleaned = cleanHeaderCandidate(line);
 
-    if (line.length < 40) {
+    if (cleaned.length > 0 && cleaned.length < 50) {
+      // 1. Check primary language keywords
       for (const [type, regex] of Object.entries(currentKeywords)) {
-        if (regex.test(line)) {
+        if (regex.test(cleaned)) {
           isHeader = true;
           matchedType = type;
           break;
+        }
+      }
+
+      // 2. Check English keywords as fallback
+      if (!isHeader && currentKeywords !== fallbackKeywords) {
+        for (const [type, regex] of Object.entries(fallbackKeywords)) {
+          if (regex.test(cleaned)) {
+            isHeader = true;
+            matchedType = type;
+            break;
+          }
         }
       }
     }
@@ -149,12 +199,14 @@ export function parseCVText(text, lang = 'en') {
       // Save prior section if it contains data
       if (currentSection.rawLines.length > 0) {
         currentSection.paragraphs = groupLinesIntoParagraphs(currentSection.rawLines);
-        parsedSections.push(currentSection);
+        if (currentSection.paragraphs.length > 0) {
+          parsedSections.push(currentSection);
+        }
       }
 
       currentSection = {
         id: `section-${matchedType}-${parsedSections.length}`,
-        title: line,
+        title: cleaned.charAt(0).toUpperCase() + cleaned.slice(1),
         icon: matchedType,
         paragraphs: [],
         rawLines: []
@@ -167,27 +219,94 @@ export function parseCVText(text, lang = 'en') {
   // Push the final section
   if (currentSection.rawLines.length > 0) {
     currentSection.paragraphs = groupLinesIntoParagraphs(currentSection.rawLines);
-    parsedSections.push(currentSection);
+    if (currentSection.paragraphs.length > 0) {
+      parsedSections.push(currentSection);
+    }
   }
 
-  // If we ended up with no real parsed sections, or just 'intro', package the whole thing as one section
-  if (parsedSections.length === 1 && parsedSections[0].id === 'intro' && parsedSections[0].rawLines.length > 0) {
-    // Split by double-newlines to guess sections
-    const blocks = text.split(/\n\s*\n+/);
-    if (blocks.length > 1) {
-      return blocks.map((block, idx) => {
-        const blockLines = block.split('\n').map(l => l.trim()).filter(Boolean);
-        const title = blockLines[0] || `Section ${idx + 1}`;
-        const remainingLines = blockLines.slice(1);
-        return {
-          id: `block-${idx}`,
-          title: title.length < 50 ? title : `Overview ${idx + 1}`,
-          icon: 'summary',
-          paragraphs: [splitIntoSentences(remainingLines.join(' '))],
-          rawLines: blockLines
-        };
-      });
+  // Auto-detect contact / personal header if intro section contains emails, phones, or URLs
+  if (parsedSections.length > 0 && parsedSections[0].id === 'intro') {
+    const introLines = parsedSections[0].rawLines.filter(Boolean);
+    const hasContactSignal = introLines.some(l => 
+      /\S+@\S+\.\S+/.test(l) || 
+      /[+]?[(]?[0-9]{2,4}[)]?[-\s./0-9]{5,15}/.test(l) || 
+      /linkedin\.com|github\.com|portfolio/i.test(l)
+    );
+
+    if (hasContactSignal) {
+      parsedSections[0].icon = 'contact';
+      parsedSections[0].title = lang === 'es' ? 'Contacto' : lang === 'fr' ? 'Coordonnées' : lang === 'de' ? 'Kontakt' : lang === 'ar' ? 'معلومات الاتصال' : 'Contact Information';
     }
+  }
+
+  // Fallback: If only 1 section ('intro') was parsed or no headers were found
+  if (parsedSections.length <= 1) {
+    // Attempt double-newline splitting to discover sections
+    const blocks = text.split(/\r?\n\s*\r?\n+/).map(b => b.trim()).filter(Boolean);
+    
+    if (blocks.length > 1) {
+      const generatedSections = [];
+      
+      blocks.forEach((block, idx) => {
+        const blockLines = block.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (blockLines.length === 0) return;
+
+        let titleCandidate = cleanHeaderCandidate(blockLines[0]);
+        let iconCandidate = 'summary';
+        let contentLines = blockLines;
+
+        // Check if the first line is a title
+        if (titleCandidate.length < 50) {
+          for (const [type, regex] of Object.entries({ ...fallbackKeywords, ...currentKeywords })) {
+            if (regex.test(titleCandidate)) {
+              iconCandidate = type;
+              contentLines = blockLines.slice(1);
+              break;
+            }
+          }
+        }
+
+        // Check if content itself suggests an icon
+        if (iconCandidate === 'summary') {
+          const lowerBlock = block.toLowerCase();
+          if (lowerBlock.includes('experience') || lowerBlock.includes('employed') || lowerBlock.includes('developer') || lowerBlock.includes('manager') || lowerBlock.includes('engineer')) {
+            iconCandidate = idx === 0 ? 'summary' : 'experience';
+          } else if (lowerBlock.includes('education') || lowerBlock.includes('university') || lowerBlock.includes('degree') || lowerBlock.includes('bachelor') || lowerBlock.includes('master')) {
+            iconCandidate = 'education';
+          } else if (lowerBlock.includes('skills') || lowerBlock.includes('javascript') || lowerBlock.includes('python') || lowerBlock.includes('tools')) {
+            iconCandidate = 'skills';
+          }
+        }
+
+        const paragraphs = groupLinesIntoParagraphs(contentLines.length > 0 ? contentLines : blockLines);
+        if (paragraphs.length > 0) {
+          generatedSections.push({
+            id: `block-${idx}`,
+            title: titleCandidate.length < 50 ? titleCandidate : `Section ${idx + 1}`,
+            icon: iconCandidate,
+            paragraphs,
+            rawLines: blockLines
+          });
+        }
+      });
+
+      if (generatedSections.length > 0) {
+        return generatedSections;
+      }
+    }
+  }
+
+  // Safety guarantee: If still no sections, wrap the entire text as a single readable Overview section
+  if (parsedSections.length === 0 || (parsedSections.length === 1 && parsedSections[0].paragraphs.length === 0)) {
+    const nonEmptyLines = rawLines.filter(Boolean);
+    const paragraphs = groupLinesIntoParagraphs(nonEmptyLines);
+    return [{
+      id: 'main-overview',
+      title: lang === 'es' ? 'Perfil del Candidato' : lang === 'fr' ? 'Profil du Candidat' : lang === 'de' ? 'Kandidatenprofil' : lang === 'ar' ? 'الملف التعريفي' : 'Candidate Overview',
+      icon: 'summary',
+      paragraphs: paragraphs.length > 0 ? paragraphs : [[text.trim()]],
+      rawLines: nonEmptyLines
+    }];
   }
 
   return parsedSections.filter(sec => sec.paragraphs.length > 0);
@@ -203,40 +322,55 @@ function groupLinesIntoParagraphs(lines) {
   let currentParagraphLines = [];
 
   for (const line of lines) {
-    // If the line looks like a bullet point or has a list indicator, start a new paragraph context
-    const isBullet = /^[•\-*+]\s|^\d+\.\s/.test(line);
-    
-    if (isBullet && currentParagraphLines.length > 0) {
-      paragraphs.push(splitIntoSentences(currentParagraphLines.join(' ')));
-      currentParagraphLines = [line];
-    } else if (line.length === 0) {
+    if (!line || line.trim().length === 0) {
       if (currentParagraphLines.length > 0) {
-        paragraphs.push(splitIntoSentences(currentParagraphLines.join(' ')));
+        const sentences = splitIntoSentences(currentParagraphLines.join(' '));
+        if (sentences.length > 0) paragraphs.push(sentences);
         currentParagraphLines = [];
       }
+      continue;
+    }
+
+    const trimmed = line.trim();
+    // If the line looks like a bullet point or has a list indicator, flush previous and start new paragraph
+    const isBullet = /^[•\-*+●■◆]\s|^\d+[.)]\s/.test(trimmed);
+    
+    if (isBullet && currentParagraphLines.length > 0) {
+      const sentences = splitIntoSentences(currentParagraphLines.join(' '));
+      if (sentences.length > 0) paragraphs.push(sentences);
+      currentParagraphLines = [trimmed];
     } else {
-      currentParagraphLines.push(line);
+      currentParagraphLines.push(trimmed);
     }
   }
 
   if (currentParagraphLines.length > 0) {
-    paragraphs.push(splitIntoSentences(currentParagraphLines.join(' ')));
+    const sentences = splitIntoSentences(currentParagraphLines.join(' '));
+    if (sentences.length > 0) paragraphs.push(sentences);
   }
 
   return paragraphs;
 }
 
 /**
- * Extract text from PDF file
+ * Extract text from PDF file with robust error handling, font support, and marked content skipping
  * @param {File} file 
  * @returns {Promise<string>}
  */
 export async function extractTextFromPDF(file) {
   try {
     const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const typedArray = new Uint8Array(arrayBuffer);
+
+    const version = pdfjsLib.version || '6.1.200';
+    const loadingTask = pdfjsLib.getDocument({
+      data: typedArray,
+      cMapUrl: `https://unpkg.com/pdfjs-dist@${version}/cmaps/`,
+      cMapPacked: true,
+      standardFontDataUrl: `https://unpkg.com/pdfjs-dist@${version}/standard_fonts/`,
+    });
+
     const pdf = await loadingTask.promise;
-    
     let fullText = '';
     
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -247,21 +381,55 @@ export async function extractTextFromPDF(file) {
       let pageText = '';
       
       for (const item of textContent.items) {
-        // Simple newline placement depending on item position shifts
-        if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+        // Skip marked content or items without string content
+        if (!item || typeof item.str !== 'string') continue;
+
+        // Safe transform check to avoid undefined reading '5'
+        if (item.transform && Array.isArray(item.transform) && item.transform.length >= 6) {
+          const currentY = item.transform[5];
+          if (lastY !== null && Math.abs(currentY - lastY) > 5) {
+            pageText += '\n';
+          }
+          lastY = currentY;
+        } else if (item.hasEOL) {
           pageText += '\n';
         }
-        pageText += item.str + ' ';
-        lastY = item.transform[5];
+        
+        pageText += item.str + (item.hasEOL ? '\n' : ' ');
       }
       
-      fullText += pageText + '\n\n';
+      fullText += pageText.trim() + '\n\n';
+    }
+
+    const trimmed = fullText.trim();
+    if (!trimmed) {
+      throw new Error("The PDF does not contain selectable text (it may be a scanned image). Please upload a text PDF or paste the CV text.");
     }
     
-    return fullText;
+    return trimmed;
   } catch (error) {
     console.error("Error extracting text from PDF: ", error);
-    throw new Error("Could not parse PDF. Make sure it is not password protected or corrupted.");
+    throw new Error(error.message || "Could not parse PDF. Make sure it is not password protected or corrupted.");
+  }
+}
+
+/**
+ * Extract text from Word (.docx) document
+ * @param {File} file 
+ * @returns {Promise<string>}
+ */
+export async function extractTextFromDocx(file) {
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const trimmed = (result.value || '').trim();
+    if (!trimmed) {
+      throw new Error("The Word document is empty or could not be read.");
+    }
+    return trimmed;
+  } catch (error) {
+    console.error("Error extracting text from Word (.docx): ", error);
+    throw new Error(error.message || "Failed to read Word document (.docx).");
   }
 }
 
@@ -292,7 +460,7 @@ export function generateCVSummary(sections, lang = 'en') {
     experienceSec.paragraphs.slice(0, 2).forEach(para => {
       if (para[0]) {
         // Strip out bullet symbols if any
-        const cleaned = para[0].replace(/^[•\-*+]\s|^\d+\.\s/, '').trim();
+        const cleaned = para[0].replace(/^[•\-*+●■◆]\s|^\d+[.)]\s/, '').trim();
         keyRoles.push(cleaned);
       }
     });
@@ -301,17 +469,17 @@ export function generateCVSummary(sections, lang = 'en') {
   let topSkills = [];
   if (skillsSec) {
     const allSkills = skillsSec.paragraphs.flat();
-    topSkills = allSkills.slice(0, 8).map(s => s.replace(/^[•\-*+]\s|^\d+\.\s/, '').trim());
+    topSkills = allSkills.slice(0, 8).map(s => s.replace(/^[•\-*+●■◆]\s|^\d+[.)]\s/, '').trim());
   }
 
   let eduText = "";
   if (educationSec && educationSec.paragraphs[0] && educationSec.paragraphs[0][0]) {
-    eduText = educationSec.paragraphs[0][0].replace(/^[•\-*+]\s|^\d+\.\s/, '').trim();
+    eduText = educationSec.paragraphs[0][0].replace(/^[•\-*+●■◆]\s|^\d+[.)]\s/, '').trim();
   }
 
   let languagesList = [];
   if (languagesSec) {
-    languagesList = languagesSec.paragraphs.flat().slice(0, 4).map(l => l.replace(/^[•\-*+]\s|^\d+\.\s/, '').trim());
+    languagesList = languagesSec.paragraphs.flat().slice(0, 4).map(l => l.replace(/^[•\-*+●■◆]\s|^\d+[.)]\s/, '').trim());
   }
 
   let overview = "";
@@ -319,7 +487,7 @@ export function generateCVSummary(sections, lang = 'en') {
 
   // Generate localized summary texts
   if (lang === 'es') {
-    overview = `Aquí está el resumen ejecutivo del perfil. Se trata de un profesional con conocimientos destacados${skillsSec ? ` en áreas como ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
+    overview = `Aquí está el resumen ejecutivo del perfil. Se trata de un profesional con conocimientos destacados${skillsSec && topSkills.length > 0 ? ` en áreas como ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
     if (expCount > 0) {
       overview += ` Cuenta con una trayectoria de aproximadamente ${expCount} puesto${expCount > 1 ? 's' : ''} de trabajo.`;
     }
@@ -340,7 +508,7 @@ export function generateCVSummary(sections, lang = 'en') {
       bullets.push(`Idiomas: ${languagesList.join(', ')}`);
     }
   } else if (lang === 'fr') {
-    overview = `Voici le résumé exécutif du profil. Il s'agit d'un professionnel spécialisé${skillsSec ? ` dans des domaines tels que ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
+    overview = `Voici le résumé exécutif du profil. Il s'agit d'un professionnel spécialisé${skillsSec && topSkills.length > 0 ? ` dans des domaines tels que ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
     if (expCount > 0) {
       overview += ` Il présente un parcours avec ${expCount} rôle${expCount > 1 ? 's' : ''} professionnel${expCount > 1 ? 's' : ''}.`;
     }
@@ -361,7 +529,7 @@ export function generateCVSummary(sections, lang = 'en') {
       bullets.push(`Langues: ${languagesList.join(', ')}`);
     }
   } else if (lang === 'de') {
-    overview = `Hier ist die Zusammenfassung des Profils. Ein Experte mit fundierten Kenntnissen${skillsSec ? ` in den Bereichen ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
+    overview = `Hier ist die Zusammenfassung des Profils. Ein Experte mit fundierten Kenntnissen${skillsSec && topSkills.length > 0 ? ` in den Bereichen ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
     if (expCount > 0) {
       overview += ` Der Werdegang umfasst ${expCount} berufliche Stationen.`;
     }
@@ -382,9 +550,9 @@ export function generateCVSummary(sections, lang = 'en') {
       bullets.push(`Sprachen: ${languagesList.join(', ')}`);
     }
   } else if (lang === 'ar') {
-    overview = `إليك الملخص التنفيذي للملف الشخصي. يُظهر المرشح مهارات متميزة${skillsSec ? ` في مجالات مثل ${topSkills.slice(0, 4).join(' و ')}` : ''}.`;
+    overview = `إليك الملخص التنفيذي للملف الشخصي. يُظهر المرشح مهارات متميزة${skillsSec && topSkills.length > 0 ? ` في مجالات مثل ${topSkills.slice(0, 4).join(' و ')}` : ''}.`;
     if (expCount > 0) {
-      overview += ` يمتلك سجل خبرة يحتوي على ${expCount} من الوظائف السابقة.`;
+      overview += ` يمتلك سجل خبرة يحتوي على ${expCount} من الأدوار السابقة.`;
     }
     if (eduText) {
       overview += ` تشمل الخلفية التعليمية: ${eduText}.`;
@@ -404,7 +572,7 @@ export function generateCVSummary(sections, lang = 'en') {
     }
   } else {
     // English (Default)
-    overview = `Here is the executive summary of this profile. The candidate displays specialized background${skillsSec ? ` with expertise in ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
+    overview = `Here is the executive summary of this profile. The candidate displays specialized background${skillsSec && topSkills.length > 0 ? ` with expertise in ${topSkills.slice(0, 4).join(', ')}` : ''}.`;
     if (expCount > 0) {
       overview += ` They have held ${expCount} professional role${expCount > 1 ? 's' : ''} in their career.`;
     }
@@ -422,7 +590,7 @@ export function generateCVSummary(sections, lang = 'en') {
       bullets.push(`Key competencies: ${topSkills.slice(0, 6).join(', ')}`);
     }
     if (projectsSec && projectsSec.paragraphs[0] && projectsSec.paragraphs[0][0]) {
-      bullets.push(`Featured project: ${projectsSec.paragraphs[0][0].replace(/^[•\-*+]\s|^\d+\.\s/, '').trim()}`);
+      bullets.push(`Featured project: ${projectsSec.paragraphs[0][0].replace(/^[•\-*+●■◆]\s|^\d+[.)]\s/, '').trim()}`);
     }
     if (languagesList.length > 0) {
       bullets.push(`Languages: ${languagesList.join(', ')}`);
@@ -446,7 +614,7 @@ export function generateCVSummary(sections, lang = 'en') {
  * @returns {Object} Qualification result showing met (boolean), message, section name, and matched snippet
  */
 export function checkQualification(rawText, qualification, sections) {
-  const term = qualification.trim().toLowerCase();
+  const term = (qualification || '').trim().toLowerCase();
   if (!term) {
     return { met: false, message: "No qualification keyword provided." };
   }
@@ -470,15 +638,17 @@ export function checkQualification(rawText, qualification, sections) {
   }
 
   // 2. Fallback: search raw text line-by-line
-  const lines = rawText.split(/\r?\n/);
-  for (const line of lines) {
-    if (line.toLowerCase().includes(term)) {
-      return {
-        met: true,
-        section: "Other details",
-        snippet: line.trim(),
-        message: `Found: "${line.trim()}"`
-      };
+  if (rawText) {
+    const lines = rawText.split(/\r?\n/);
+    for (const line of lines) {
+      if (line.toLowerCase().includes(term)) {
+        return {
+          met: true,
+          section: "Other details",
+          snippet: line.trim(),
+          message: `Found: "${line.trim()}"`
+        };
+      }
     }
   }
 

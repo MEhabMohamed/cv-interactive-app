@@ -1,17 +1,26 @@
 import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs';
 import mammoth from 'mammoth';
 
-// Set up PDFJS worker locally via standard Vite / browser URL, with fallback
-if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
+// Attach WorkerMessageHandler to globalThis so fake worker succeeds instantly without network on mobile
+if (typeof window !== 'undefined') {
   try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      'pdfjs-dist/build/pdf.worker.min.mjs',
-      import.meta.url
-    ).toString();
+    window.pdfjsWorker = pdfjsWorker;
+    globalThis.pdfjsWorker = pdfjsWorker;
   } catch (e) {
-    console.warn("Could not set local workerSrc, using unpkg fallback", e);
-    const version = pdfjsLib.version || '6.1.200';
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+    console.warn("Could not register global pdfjsWorker:", e);
+  }
+
+  if (pdfjsLib.GlobalWorkerOptions) {
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        'pdfjs-dist/build/pdf.worker.min.mjs',
+        import.meta.url
+      ).toString();
+    } catch {
+      const version = pdfjsLib.version || '6.1.200';
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+    }
   }
 }
 
@@ -361,6 +370,12 @@ export async function extractTextFromPDF(file) {
   try {
     const arrayBuffer = await file.arrayBuffer();
     const typedArray = new Uint8Array(arrayBuffer);
+
+    // Ensure WorkerMessageHandler is registered on globalThis for mobile fake worker
+    if (typeof window !== 'undefined' && pdfjsWorker?.WorkerMessageHandler) {
+      window.pdfjsWorker = pdfjsWorker;
+      globalThis.pdfjsWorker = pdfjsWorker;
+    }
 
     const version = pdfjsLib.version || '6.1.200';
     const loadingTask = pdfjsLib.getDocument({

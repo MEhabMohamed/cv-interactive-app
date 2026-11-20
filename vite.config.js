@@ -7,11 +7,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/api-gemini': {
-        target: 'https://generativelanguage.googleapis.com',
+      '/api': {
+        target: 'http://localhost:5000',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api-gemini/, '')
-      }
-    }
-  }
+      },
+    },
+  },
 })

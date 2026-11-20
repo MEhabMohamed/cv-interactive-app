@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "node server/index.js",
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
+    "ioredis": "^6.0.0",
     "lucide-react": "^1.21.0",
     "mammoth": "^1.13.0",
     "pdfjs-dist": "^6.1.200",

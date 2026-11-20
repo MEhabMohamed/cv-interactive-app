@@ -32,6 +32,8 @@ import {
 import SpeechController from './utils/SpeechController';
 import AvatarCanvas from './components/AvatarCanvas';
 import CVDisplay from './components/CVDisplay';
+import { generateCvViaApi } from './app/generator/cvGenerator.service';
+import CVConstructorPanel from './app/generator/CVConstructorPanel';
 
 export default function App() {
   // CV & Parsing States
@@ -363,99 +365,19 @@ export default function App() {
     if (e) e.preventDefault();
     setIsGenerating(true);
     setGenError('');
-    
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-      setGenError('Gemini API key is missing. Please configure VITE_GEMINI_API_KEY in your .env file.');
-      setIsGenerating(false);
-      return;
-    }
-
-    const prompt = `You are an expert professional CV writer. 
-Write a high-quality, comprehensive CV for the candidate detailed below. 
-You MUST format your output EXACTLY as specified in the rules, with NO extra markdown delimiters (like \`\`\`markdown or \`\`\`), NO preamble, and NO conversational text.
-
-Candidate Information:
-- Full Name: ${genName}
-- Target Role: ${genRole}
-- Email: ${genEmail}
-- Phone: ${genPhone}
-- Key Skills: ${genSkills}
-- Work Experience Details: ${genExperience}
-- Education Details: ${genEducation}
-- Personal Projects: ${genProjects}
-- Custom Focus / Enhancement Instructions: ${genEnhance}
-
-Formatting Rules:
-1. Write uppercase section titles on their own line.
-2. Under each section, write the content cleanly.
-3. For EXPERIENCE and PROJECTS, use bullet points starting with "- " or "• ".
-4. Provide the sections in the following order:
-
-CONTACT
-Name: ${genName}
-Email: ${genEmail}
-Phone: ${genPhone}
-Role: ${genRole}
-
-SUMMARY
-[Write a rich, detailed, professional profile summary of 2-3 sentences based on the target role and background]
-
-EXPERIENCE
-[For each role, write:
-Job Title - Company (Dates)
-- Bullet point describing achievements and responsibilities
-- Another descriptive bullet point]
-
-EDUCATION
-[For each qualification, write:
-Degree/Certificate - School/Institution (Dates)
-- Bullet point or details if appropriate]
-
-SKILLS
-[List the skills separated by commas, e.g. React, Node.js, JavaScript, Python]
-
-PROJECTS
-[For each project, write:
-Project Name
-- Description of project and technologies used]
-
-Ensure the language of the CV is English (unless custom focus suggests a different language). Write professionally and make the accomplishments sound impressive.`;
 
     try {
-      const response = await fetch(
-        `/api-gemini/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [{
-              parts: [{
-                text: prompt
-              }]
-            }]
-          })
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content || !data.candidates[0].content.parts || data.candidates[0].content.parts.length === 0) {
-        throw new Error('Invalid response structure from Gemini API');
-      }
-
-      let cvText = data.candidates[0].content.parts[0].text;
-      if (!cvText || !cvText.trim()) {
-        throw new Error('Generated CV text is empty');
-      }
-
-      // Strip markdown code fences if present
-      cvText = cvText.replace(/^```[a-zA-Z]*\n/, '').replace(/\n```$/, '').trim();
+      const cvText = await generateCvViaApi({
+        name: genName,
+        role: genRole,
+        email: genEmail,
+        phone: genPhone,
+        skills: genSkills,
+        experience: genExperience,
+        education: genEducation,
+        projects: genProjects,
+        enhance: genEnhance,
+      });
 
       // Process the generated raw text
       processRawText(cvText, `${genName.replace(/\s+/g, '_')}_CV.txt`);
@@ -562,153 +484,15 @@ Ensure the language of the CV is English (unless custom focus suggests a differe
 
   const renderGeneratorForm = () => {
     return (
-      <div className="card-glass" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-        <form onSubmit={handleGenerateCV} className="generator-form">
-          <div className="generator-header">
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Sparkles size={20} className="text-secondary" style={{ color: 'var(--secondary)' }} />
-              AI CV Generator
-            </h3>
-            {!sections && (
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => setShowGenerator(false)}
-                style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-              >
-                <ArrowLeft size={16} /> Back
-              </button>
-            )}
-          </div>
-
-          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-            Enter your details below and Gemini will generate a professional CV tailored for you.
-          </p>
-
-          {genError && (
-            <div className="card-glass" style={{ borderColor: 'rgba(239, 68, 68, 0.3)', padding: '0.75rem 1rem', background: 'rgba(239, 68, 68, 0.05)', color: 'var(--danger)', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-              <XCircle size={18} />
-              <span style={{ fontSize: '0.88rem' }}>{genError}</span>
-            </div>
-          )}
-
-          <div className="generator-grid">
-            <div className="setting-row">
-              <label>Full Name *</label>
-              <input
-                type="text"
-                required
-                className="generator-input"
-                placeholder="e.g. Jane Doe"
-                value={genName}
-                onChange={(e) => setGenName(e.target.value)}
-              />
-            </div>
-            <div className="setting-row">
-              <label>Target Role *</label>
-              <input
-                type="text"
-                required
-                className="generator-input"
-                placeholder="e.g. Senior Frontend Engineer"
-                value={genRole}
-                onChange={(e) => setGenRole(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="generator-grid">
-            <div className="setting-row">
-              <label>Email Address</label>
-              <input
-                type="email"
-                className="generator-input"
-                placeholder="e.g. jane.doe@example.com"
-                value={genEmail}
-                onChange={(e) => setGenEmail(e.target.value)}
-              />
-            </div>
-            <div className="setting-row">
-              <label>Phone Number</label>
-              <input
-                type="text"
-                className="generator-input"
-                placeholder="e.g. +1 (555) 019-2834"
-                value={genPhone}
-                onChange={(e) => setGenPhone(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="setting-row">
-            <label>Core Skills (comma separated)</label>
-            <input
-              type="text"
-              className="generator-input"
-              placeholder="e.g. React, JavaScript, TypeScript, CSS, Git, Node.js"
-              value={genSkills}
-              onChange={(e) => setGenSkills(e.target.value)}
-            />
-          </div>
-
-          <div className="setting-row">
-            <label>Work Experience (rough notes or roles)</label>
-            <textarea
-              className="generator-input generator-textarea"
-              placeholder="e.g. Senior Dev at TechCorp (2021-Present) - Led React team, optimized web performance by 30%.&#10;Software Engineer at WebInc (2019-2021) - Maintained legacy Node apps."
-              value={genExperience}
-              onChange={(e) => setGenExperience(e.target.value)}
-            />
-          </div>
-
-          <div className="setting-row">
-            <label>Education (degrees or courses)</label>
-            <textarea
-              className="generator-input generator-textarea"
-              placeholder="e.g. Bachelor of Science in Computer Science - State University (2015-2019)"
-              value={genEducation}
-              onChange={(e) => setGenEducation(e.target.value)}
-            />
-          </div>
-
-          <div className="setting-row">
-            <label>Projects (optional)</label>
-            <textarea
-              className="generator-input generator-textarea"
-              placeholder="e.g. ChatApp - Built a real-time chat application using WebSockets and React."
-              value={genProjects}
-              onChange={(e) => setGenProjects(e.target.value)}
-            />
-          </div>
-
-          <div className="setting-row">
-            <label>AI Enhancer / Special Focus (optional)</label>
-            <textarea
-              className="generator-input generator-textarea"
-              placeholder="e.g. Make it sound highly analytical and leadership-focused, use action verbs."
-              value={genEnhance}
-              onChange={(e) => setGenEnhance(e.target.value)}
-            />
-          </div>
-
-          <button
-            type="submit"
-            className="btn-accent"
-            disabled={isGenerating}
-            style={{ alignSelf: 'flex-end', minWidth: '150px' }}
-          >
-            {isGenerating ? (
-              <>
-                <RefreshCw size={16} className="animate-spin" /> Generating...
-              </>
-            ) : (
-              <>
-                <Sparkles size={16} /> Generate CV
-              </>
-            )}
-          </button>
-        </form>
-      </div>
+      <CVConstructorPanel
+        hasExistingCv={Boolean(sections)}
+        onBack={() => setShowGenerator(false)}
+        onCvConstructed={(cvText, fileName) => {
+          processRawText(cvText, fileName);
+          setShowGenerator(false);
+          setActiveTab('full-cv');
+        }}
+      />
     );
   };
 
